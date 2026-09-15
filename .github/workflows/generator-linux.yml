@@ -173,6 +173,29 @@ jobs:
           name: bridge-artifact
           path: ./
 
+      # vcpkg's scripts/cmake/z_vcpkg_spdx.cmake calls string(JSON ... STRING_ENCODE),
+      # which exists only in CMake 4.4+ (verified: 3.31.6 and 4.0.0 both reject it).
+      # vcpkg pins 4.4.0 in scripts/vcpkg-tools.json and downloads it itself -- but
+      # lukka/run-vcpkg exports VCPKG_FORCE_SYSTEM_BINARIES=1 on arm runners, and
+      # that tells vcpkg not to fetch its own tools and to take CMake from PATH
+      # instead. ubuntu-22.04-arm ships 3.22, so every port going through
+      # vcpkg_from_git (aom) fails to configure. x86_64 has no such variable set and
+      # quietly uses vcpkg's own 4.4.0, which is why only the arm64 job breaks.
+      # Put the same 4.4.0 on PATH here so both architectures configure identically.
+      # Keyed on VCPKG_COMMIT_ID rather than on the version string, because the
+      # requirement belongs to the vcpkg tree, not to a release name. rdgen's
+      # dropdown labels this build "nightly" but submits version=master
+      # (rdgenerator/forms.py: ('master','nightly')), so there is no separate
+      # nightly value to miss -- and if that mapping ever changes, this condition
+      # follows VCPKG_COMMIT_ID automatically instead of silently going quiet.
+      # Versioned builds pin vcpkg 120deac, which never calls STRING_ENCODE and
+      # pins CMake 3.30.1; CMake 4.x drops cmake_minimum_required(VERSION < 3.5),
+      # so forcing it on them could break ports that configure fine today.
+      - name: Install a CMake vcpkg can use (arm64 only)
+        if: matrix.job.arch == 'aarch64' && env.UPLOAD_ARTIFACT == 'true' && env.VCPKG_COMMIT_ID == '9e593bb18ea69cc5095e012465dcd675a822ed0d'
+        uses: lukka/get-cmake@latest
+        with:
+          cmakeVersion: "4.4.0"
 
       - name: Setup vcpkg with Github Actions binary cache
         if: matrix.job.arch == 'x86_64' || env.UPLOAD_ARTIFACT == 'true'
@@ -683,6 +706,19 @@ jobs:
     needs: [generate-bridge-linux, setup]
     name: build rustdesk linux drm x86_64
     runs-on: ubuntu-22.04
+    # Only the master branch of rustdesk has the drm/libdrmtap support this job
+    # drives: build.py at tag 1.4.9 has neither build_libdrmtap_so nor
+    # assert_staged_binary_is_drm, so the "Build libdrmtap" step dies with
+    #   AttributeError: module 'b' has no attribute 'build_libdrmtap_so'
+    # A versioned build therefore always failed here, and because one failed job
+    # marks the whole run failed, rdgen reported "Build Failure" for a client
+    # that had in fact been built. No other job consumes this one's artifacts
+    # (deploy needs only build-rustdesk-linux, build-flatpak and build-appimage),
+    # and no other platform workflow has a drm job at all -- which is why macOS,
+    # Windows and Android were unaffected. Gate it the way bridge.yml already
+    # distinguishes the two sources; rdgen's dropdown labels this "nightly" but
+    # submits version=master.
+    if: ${{ inputs.version == 'master' }}
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
@@ -1268,8 +1304,20 @@ jobs:
           sudo pip3 install git+https://github.com/rustdesk-org/appimage-builder.git
           pushd appimage
           sudo appimage-builder --skip-tests --recipe ./AppImageBuilder-${{ matrix.job.arch }}.yml
-          # recipe output is <name>-<version>-<arch>.AppImage (name = rustdesk or custom)
-          sudo mv ./*-${{ env.VERSION }}-${{ matrix.job.arch }}.AppImage ./${{ env.filename }}-${{ matrix.job.arch }}.AppImage
+          # recipe output is <name>-<version>-<arch>.AppImage, where <version> is the
+          # version stamped in AppImageBuilder-<arch>.yml -- NOT the workflow's VERSION
+          # input. They coincide for a tagged build (1.4.9), which is why globbing on
+          # VERSION worked there, but a nightly build passes VERSION=master while the
+          # recipe still says 1.5.0, so the glob matched nothing:
+          #   mv: cannot stat './*-master-x86_64.AppImage': No such file or directory
+          # Match on the arch suffix instead, and exclude the destination name so this
+          # can never try to move a file onto itself.
+          dest="${{ env.filename }}-${{ matrix.job.arch }}.AppImage"
+          src=$(find . -maxdepth 1 -name "*-${{ matrix.job.arch }}.AppImage" ! -name "$dest" | head -1)
+          if [ -z "$src" ]; then
+            echo "::error::no *-${{ matrix.job.arch }}.AppImage produced by appimage-builder"; ls -l; exit 1
+          fi
+          sudo mv "$src" "./$dest"
           popd
 
       - name: send file to rdgen server
