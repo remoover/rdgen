@@ -173,6 +173,7 @@ jobs:
           name: bridge-artifact
           path: ./
 
+
       - name: Setup vcpkg with Github Actions binary cache
         if: matrix.job.arch == 'x86_64' || env.UPLOAD_ARTIFACT == 'true'
         uses: lukka/run-vcpkg@v11
@@ -245,7 +246,15 @@ jobs:
           sed -i -e 's|OriginalFilename = "rustdesk.exe"|OriginalFilename = "${{ env.appname }}.exe"|' ./libs/portable/Cargo.toml
           sed -i -e 's|const APP_PREFIX: \&str = "rustdesk";|const APP_PREFIX: \&str = "${{ env.appname }}";|' ./libs/portable/src/main.rs
           find ./src/lang -name "*.rs" -exec sed -i -e 's|RustDesk|${{ env.appname }}|' {} \;
-          sed -i -e '/-p tmpdeb\/usr\/lib\/rustdesk/d' ./build.py
+          # NOTE: a line deleting build.py's "mkdir -p tmpdeb/usr/lib/rustdesk" used to
+          # live here. It is gone on purpose. stage_libdrmtap_into_deb() creates that
+          # directory and then copies libdrmtap into it; with the mkdir deleted the copy
+          # fails with "cp: cannot create regular file 'tmpdeb/usr/lib/rustdesk/': No
+          # such file or directory" and the drm job dies at packaging. It went unnoticed
+          # because that job used to fail earlier, at the staged-binary assertion.
+          # Non-drm builds are unaffected either way: they never call that function, so
+          # the mkdir never runs and no empty directory is shipped. Upstream has no such
+          # deletion.
 
       - name: change company name
         if: env.compname != 'Purslane Ltd'
@@ -521,6 +530,30 @@ jobs:
                 sed -ie "s|\(cp .* \)tmpdeb/usr/share/rustdesk/files/systemd/|\1tmpdeb/usr/share/rustdesk/files/systemd/${{ env.appname }}.service|g" build.py
                 sed -ie "s|cp -r \(.\+\)\* \([^ ]\+\)/rustdesk|mv \1rustdesk \1${{ env.appname }}; cp -r \1\* \2/${{ env.appname }}|g" build.py
                 sed -ie "s|\(tmpdeb/[^ ]*\)rustdesk|\1${{ env.appname }}|g" build.py
+                # The rename above is greedy in \1, so it rewrites only the LAST
+                # "rustdesk" of each path and leaves the staged tree inconsistent with
+                # what build.py actually creates. Three corrections, all of them
+                # affecting only the drm code paths (measured_glibc_floor and
+                # assert_staged_binary_is_drm); the stock packaging path never
+                # executes these lines.
+                #
+                # 1. Directory component: the cp -r rename above really stages into
+                #    tmpdeb/usr/share/<appname>/, but the globs were left pointing at
+                #    tmpdeb/usr/share/rustdesk/.
+                sed -ie "s|tmpdeb/usr/share/rustdesk/|tmpdeb/usr/share/${{ env.appname }}/|g" build.py
+                # 2. Library filename: build.py renames only the executable
+                #    (mv <bundle>/rustdesk <bundle>/<appname>) and copies the bundle
+                #    verbatim, so the cdylib stays librustdesk.so. The greedy sed had
+                #    renamed it to lib<appname>.so, so the glob matched nothing and the
+                #    drm marker -- which lives in the cdylib, not in the thin Flutter
+                #    launcher -- was never found.
+                sed -ie "s|lib/lib${{ env.appname }}\.so|lib/librustdesk.so|g" build.py
+                # 3. libdrmtap must NOT be renamed. drmtap_dl.rs dlopens the absolute
+                #    path /usr/lib/rustdesk/libdrmtap.so.0, which is compiled into the
+                #    binary and is not rewritten here. Staging it under
+                #    /usr/lib/<appname>/ would build and package cleanly and then fail
+                #    to load on the installed machine.
+                sed -ie "s|tmpdeb/usr/lib/${{ env.appname }}|tmpdeb/usr/lib/rustdesk|g" build.py
                 sed -ie "s|Package: rustdesk|Package: ${{ env.appname }}|g" build.py
                 sed -ie "s|RustDesk|${{ env.appname }}|g" res/rustdesk.desktop
                 FILES=$(sed -ne "s~.*cp\s\(../\)\?\+\(.\+\.\(desktop\|service\)\)\s\+tmpdeb/.*~\2~p" build.py | sort | uniq)
@@ -825,7 +858,15 @@ jobs:
           sed -i -e 's|OriginalFilename = "rustdesk.exe"|OriginalFilename = "${{ env.appname }}.exe"|' ./libs/portable/Cargo.toml
           sed -i -e 's|const APP_PREFIX: \&str = "rustdesk";|const APP_PREFIX: \&str = "${{ env.appname }}";|' ./libs/portable/src/main.rs
           find ./src/lang -name "*.rs" -exec sed -i -e 's|RustDesk|${{ env.appname }}|' {} \;
-          sed -i -e '/-p tmpdeb\/usr\/lib\/rustdesk/d' ./build.py
+          # NOTE: a line deleting build.py's "mkdir -p tmpdeb/usr/lib/rustdesk" used to
+          # live here. It is gone on purpose. stage_libdrmtap_into_deb() creates that
+          # directory and then copies libdrmtap into it; with the mkdir deleted the copy
+          # fails with "cp: cannot create regular file 'tmpdeb/usr/lib/rustdesk/': No
+          # such file or directory" and the drm job dies at packaging. It went unnoticed
+          # because that job used to fail earlier, at the staged-binary assertion.
+          # Non-drm builds are unaffected either way: they never call that function, so
+          # the mkdir never runs and no empty directory is shipped. Upstream has no such
+          # deletion.
 
       - name: change company name
         if: env.compname != 'Purslane Ltd'
@@ -1055,6 +1096,30 @@ jobs:
                 sed -ie "s|\(cp .* \)tmpdeb/usr/share/rustdesk/files/systemd/|\1tmpdeb/usr/share/rustdesk/files/systemd/${{ env.appname }}.service|g" build.py
                 sed -ie "s|cp -r \(.\+\)\* \([^ ]\+\)/rustdesk|mv \1rustdesk \1${{ env.appname }}; cp -r \1\* \2/${{ env.appname }}|g" build.py
                 sed -ie "s|\(tmpdeb/[^ ]*\)rustdesk|\1${{ env.appname }}|g" build.py
+                # The rename above is greedy in \1, so it rewrites only the LAST
+                # "rustdesk" of each path and leaves the staged tree inconsistent with
+                # what build.py actually creates. Three corrections, all of them
+                # affecting only the drm code paths (measured_glibc_floor and
+                # assert_staged_binary_is_drm); the stock packaging path never
+                # executes these lines.
+                #
+                # 1. Directory component: the cp -r rename above really stages into
+                #    tmpdeb/usr/share/<appname>/, but the globs were left pointing at
+                #    tmpdeb/usr/share/rustdesk/.
+                sed -ie "s|tmpdeb/usr/share/rustdesk/|tmpdeb/usr/share/${{ env.appname }}/|g" build.py
+                # 2. Library filename: build.py renames only the executable
+                #    (mv <bundle>/rustdesk <bundle>/<appname>) and copies the bundle
+                #    verbatim, so the cdylib stays librustdesk.so. The greedy sed had
+                #    renamed it to lib<appname>.so, so the glob matched nothing and the
+                #    drm marker -- which lives in the cdylib, not in the thin Flutter
+                #    launcher -- was never found.
+                sed -ie "s|lib/lib${{ env.appname }}\.so|lib/librustdesk.so|g" build.py
+                # 3. libdrmtap must NOT be renamed. drmtap_dl.rs dlopens the absolute
+                #    path /usr/lib/rustdesk/libdrmtap.so.0, which is compiled into the
+                #    binary and is not rewritten here. Staging it under
+                #    /usr/lib/<appname>/ would build and package cleanly and then fail
+                #    to load on the installed machine.
+                sed -ie "s|tmpdeb/usr/lib/${{ env.appname }}|tmpdeb/usr/lib/rustdesk|g" build.py
                 sed -ie "s|Package: rustdesk|Package: ${{ env.appname }}|g" build.py
                 sed -ie "s|RustDesk|${{ env.appname }}|g" res/rustdesk.desktop
                 FILES=$(sed -ne "s~.*cp\s\(../\)\?\+\(.\+\.\(desktop\|service\)\)\s\+tmpdeb/.*~\2~p" build.py | sort | uniq)
@@ -1186,8 +1251,16 @@ jobs:
         shell: bash
         run: |
           if [ "${{ env.appname }}" != "rustdesk" ] && [ "${{ env.appname }}" != "RustDesk" ]; then
+            # The recipe's script does `bsdtar -zxvf rustdesk.deb`, so after the rename
+            # below it looks for <appname>.deb -- the deb has to end up under exactly
+            # that name. It used to be renamed to <filename>.deb, which only matched
+            # when appname and filename happened to be equal; otherwise the build died
+            # with "bsdtar: Error opening archive: Failed to open '<appname>.deb'".
+            # The deb is also moved out of the way first because `appimage/*` globs it
+            # too, and running sed over an ar archive rewrites bytes inside it.
+            mv appimage/rustdesk.deb "${RUNNER_TEMP}/appimage-payload.deb"
             sed -ie "s|rustdesk|${{ env.appname }}|g" appimage/*
-            mv appimage/rustdesk.deb "appimage/${{ env.filename }}.deb" 2>/dev/null || true
+            mv "${RUNNER_TEMP}/appimage-payload.deb" "appimage/${{ env.appname }}.deb"
           fi
           sudo apt-get update -y
           sudo apt-get install -y libarchive-tools libfuse2
@@ -1302,9 +1375,25 @@ jobs:
             apt-get install -y git flatpak flatpak-builder
           run: |
             if [ "${{ env.appname }}" != "rustdesk" ] && [ "${{ env.appname }}" != "RustDesk" ]; then
+              # Same fix as the AppImage job: the manifest's source path is rewritten to
+              # <appname>.deb by the sed below, so the file must carry that exact name.
+              # Renaming it to <filename>.deb instead made flatpak-builder fail with
+              # "Failed to download sources: module <appname>: Can't find file at
+              # <appname>.deb". The deb is moved aside first because `flatpak/*` globs
+              # it too and sed would rewrite bytes inside the archive.
+              mv flatpak/rustdesk.deb /tmp/flatpak-payload.deb
               sed -ie "s|rustdesk|${{ env.appname }}|g" flatpak/*
               sed -ie "s|RustDesk|${{ env.appname }}|g" flatpak/*
-              mv flatpak/rustdesk.deb "flatpak/${{ env.filename }}.deb" 2>/dev/null || true
+              mv /tmp/flatpak-payload.deb "flatpak/${{ env.appname }}.deb"
+              # The manifest's other source is the metainfo file, and the seds above
+              # rewrote the REFERENCE (com.rustdesk.RustDesk.metainfo.xml becomes
+              # com.<appname>.<appname>.metainfo.xml) without renaming the file on disk,
+              # so flatpak-builder stopped with
+              #   Failed to download sources: module <appname>:
+              #   Can't find file at com.<appname>.<appname>.metainfo.xml
+              # Its contents were rewritten by those same seds, so only the name is left.
+              mv flatpak/com.rustdesk.RustDesk.metainfo.xml \
+                 "flatpak/com.${{ env.appname }}.${{ env.appname }}.metainfo.xml"
             fi
             # disable git safe.directory
             git config --global --add safe.directory "*"
